@@ -10,6 +10,9 @@ pr:
 
 variables:
   tfVersion: '1.0.0'
+  backendResourceGroup: 'rg-terraform-state'
+  backendStorageAccount: 'stterraformstate'
+  backendContainerName: 'tfstate'
 
 stages:
   - stage: Plan
@@ -19,43 +22,67 @@ stages:
       - job: TerraformPlan
         displayName: Terraform Plan
         pool:
-          name: 'MDA DevOps Terraform Runners'  # Use a specific agent pool
+          name: 'MDA DevOps Terraform Runners'
         steps:
-          - checkout: git://MDA_Terraform_Repo@main  # Checkout from a specific Azure Repo
+          - checkout: git://MDA_Terraform_Repo@main
             persistCredentials: true
 
+          - task: TerraformInstaller@0
+            displayName: 'Install Terraform $(tfVersion)'
+            inputs:
+              terraformVersion: $(tfVersion)
+
           - script: |
+              set -e
               echo "Initializing Terraform"
-              terraform init
-              terraform fmt
+              terraform init \
+                -backend-config="resource_group_name=$(backendResourceGroup)" \
+                -backend-config="storage_account_name=$(backendStorageAccount)" \
+                -backend-config="container_name=$(backendContainerName)" \
+                -backend-config="key=$(Build.Environment).tfstate"
+              terraform fmt -check
               terraform validate
-              terraform plan -var-file=$(environment).tfvars
+              terraform plan -var-file=$(Build.Environment).tfvars -detailed-exitcode
             displayName: 'Run Terraform Plan'
             env:
-              environment: $(Build.Environment)
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
 
   - stage: Deploy
     displayName: Deploy Stage
-    condition: and(succeeded(), eq(dependencies.Plan.outputs['Plan.jobName.isSuccessful'], 'true'))
+    condition: succeeded()
+    dependsOn: Plan
     jobs:
       - deployment: TerraformApply
         displayName: Terraform Apply
-        environment: 
-          name: prod-deploy
-          resourceType: VirtualMachine
+        environment: prod-deploy
         pool:
-          name: 'MDA DevOps Terraform Runners'  # Use a specific agent pool
+          name: 'MDA DevOps Terraform Runners'
         strategy:
           runOnce:
             deploy:
               steps:
-                - checkout: git://MDA_Terraform_Repo@main  # Ensure the same repository is used
+                - checkout: git://MDA_Terraform_Repo@main
+                
+                - task: TerraformInstaller@0
+                  displayName: 'Install Terraform $(tfVersion)'
+                  inputs:
+                    terraformVersion: $(tfVersion)
+
                 - script: |
-                    echo "Applying Terraform"
-                    terraform init
-                    terraform fmt
-                    terraform validate
-                    terraform apply -var-file=$(environment).tfvars -auto-approve
+                    set -e
+                    printf "Validating Terraform configuration\n"
+                    terraform init \
+                      -backend-config="resource_group_name=$(backendResourceGroup)" \
+                      -backend-config="storage_account_name=$(backendStorageAccount)" \
+                      -backend-config="container_name=$(backendContainerName)" \
+                      -backend-config="key=$(Build.Environment).tfstate"
+                    terraform apply -var-file=$(Build.Environment).tfvars -auto-approve
                   displayName: 'Run Terraform Apply'
-                - env:
-                    environment: $(Build.Environment)
+                  env:
+                    ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+                    ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+                    ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+                    ARM_TENANT_ID: $(ARM_TENANT_ID)
